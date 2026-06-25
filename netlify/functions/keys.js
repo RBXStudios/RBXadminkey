@@ -1,5 +1,5 @@
 // ============================================================
-// RBX EXPLOIT — Keys API
+// RBX EXPLOIT — Keys API (persistência simples em arquivo /tmp)
 // rbxpainelkeylol.netlify.app/.netlify/functions/keys
 //
 // Rotas (via ?action=...):
@@ -11,24 +11,52 @@
 //   renew     → renova tempo da key        (admin)
 // ============================================================
 
-const ADMIN_EMAIL    = "rbxstudios@gmail.com";
-const ADMIN_PASSWORD = "RBXStudios200@@";
+const fs = require('fs');
+const path = require('path');
 
-// ── Banco em memória ─────────────────────────────────────────
-// Para persistência real: ative Netlify Blobs (veja README).
-let DB = {
-  keys: [
-    {
-      code:      "RBXD-LOADFLINT-DEV",
-      type:      "dev",
-      duration:  "perm",
-      createdAt: new Date().toISOString(),
-      expiresAt: null,
-      active:    true,
-      hwid:      null,
+const ADMIN_EMAIL    = process.env.PANEL_ADMIN_EMAIL || "rbxstudios@gmail.com";
+const ADMIN_PASSWORD = process.env.PANEL_ADMIN_PASSWORD || "RBXStudios200@@";
+
+// Arquivo local de persistência (melhor usar Netlify Blobs/DB em produção)
+const PERSIST_PATH = process.env.KEYS_FILE_PATH || "/tmp/rbx_keys.json";
+
+// ── Carrega / salva DB ─────────────────────────────────────
+function loadDB() {
+  try {
+    if (fs.existsSync(PERSIST_PATH)) {
+      const txt = fs.readFileSync(PERSIST_PATH, "utf8");
+      const data = JSON.parse(txt);
+      if (data && Array.isArray(data.keys)) return data;
     }
-  ]
-};
+  } catch (e) {
+    console.error("loadDB error:", e);
+  }
+  // fallback inicial
+  return {
+    keys: [
+      {
+        code:      "RBXD-LOADFLINT-DEV",
+        type:      "dev",
+        duration:  "perm",
+        createdAt: new Date().toISOString(),
+        expiresAt: null,
+        active:    true,
+        hwid:      null,
+      }
+    ]
+  };
+}
+
+function saveDB(db) {
+  try {
+    fs.mkdirSync(path.dirname(PERSIST_PATH), { recursive: true });
+    fs.writeFileSync(PERSIST_PATH, JSON.stringify(db, null, 2), "utf8");
+    return true;
+  } catch (e) {
+    console.error("saveDB error:", e);
+    return false;
+  }
+}
 
 // ── Helpers ──────────────────────────────────────────────────
 function seg(n = 5) {
@@ -82,13 +110,20 @@ function json(status, body) {
 
 function checkAdmin(auth) {
   if (!auth || !auth.startsWith("Basic ")) return false;
-  const [e, p] = Buffer.from(auth.slice(6), "base64").toString().split(":");
-  return e === ADMIN_EMAIL && p === ADMIN_PASSWORD;
+  try {
+    const [e, p] = Buffer.from(auth.slice(6), "base64").toString().split(":");
+    return e === ADMIN_EMAIL && p === ADMIN_PASSWORD;
+  } catch {
+    return false;
+  }
 }
 
 // ── Handler ──────────────────────────────────────────────────
 exports.handler = async function (event) {
   if (event.httpMethod === "OPTIONS") return cors({ statusCode: 204, body: "" });
+
+  // Carrega DB atual
+  let DB = loadDB();
 
   const action = (event.queryStringParameters || {}).action || "";
   let body = {};
@@ -107,6 +142,7 @@ exports.handler = async function (event) {
     if (hwid) {
       if (!found.hwid) {
         found.hwid = hwid;
+        saveDB(DB);
       } else if (found.hwid !== hwid) {
         return json(200, { valid: false, reason: "Key vinculada a outro dispositivo" });
       }
@@ -148,6 +184,7 @@ exports.handler = async function (event) {
       hwid:      null,
     };
     DB.keys.push(newKey);
+    saveDB(DB);
     return json(201, { success: true, key: newKey });
   }
 
@@ -180,6 +217,7 @@ exports.handler = async function (event) {
     const idx = DB.keys.findIndex(k => k.code === code);
     if (idx === -1) return json(404, { error: "Key não encontrada" });
     DB.keys.splice(idx, 1);
+    saveDB(DB);
     return json(200, { success: true });
   }
 
@@ -190,6 +228,7 @@ exports.handler = async function (event) {
     const found = DB.keys.find(k => k.code === code);
     if (!found) return json(404, { error: "Key não encontrada" });
     found.active = !found.active;
+    saveDB(DB);
     return json(200, { success: true, active: found.active });
   }
 
@@ -206,6 +245,7 @@ exports.handler = async function (event) {
     found.duration  = duration;
     found.expiresAt = calcExpires(duration);
     found.active    = true;
+    saveDB(DB);
     return json(200, { success: true, key: { ...found, daysLeft: daysLeft(found) } });
   }
 
