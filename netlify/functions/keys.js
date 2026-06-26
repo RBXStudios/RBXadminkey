@@ -3,12 +3,14 @@
 // rbxpainelkeylol.netlify.app/.netlify/functions/keys
 //
 // Rotas (via ?action=...):
-//   validate  → valida key + HWID binding  (chamado pelo app C#)
-//   create    → cria key                   (admin)
-//   list      → lista todas as keys        (admin)
-//   delete    → deleta key                 (admin)
-//   toggle    → ativa / desativa           (admin)
-//   renew     → renova tempo da key        (admin)
+//   validate  → valida key + HWID binding         (chamado pelo app C#)
+//   create    → cria key                          (admin)
+//   list      → lista keys (suporta ?search=, ?type=, ?status=)  (admin)
+//   delete    → deleta key                        (admin)
+//   toggle    → ativa / desativa                  (admin)
+//   renew     → renova tempo da key                (admin)
+//   edit      → edita tipo/duração/status/HWID em uma chamada (admin)
+//   history   → timeline de eventos de uma key (?code=)         (admin)
 // ============================================================
 //
 // IMPORTANTE: precisa do pacote "@netlify/blobs" instalado nesse projeto
@@ -105,6 +107,7 @@ async function revokeExpiredKeys(DB) {
   for (const k of DB.keys) {
     if (k.active && isExpired(k)) {
       k.active = false;
+      addHistory(k, "auto_revoke", "Expirou e foi desativada automaticamente");
       changed = true;
     }
   }
@@ -116,6 +119,18 @@ function daysLeft(k) {
   if (!k.expiresAt) return null;
   const diff = new Date(k.expiresAt) - new Date();
   return Math.max(0, Math.ceil(diff / 86400000));
+}
+
+// Registra um evento no histórico da própria key (mantém só os últimos 50).
+// "ver histórico" no painel é isso: cada key carrega sua própria timeline.
+function addHistory(k, action, detail) {
+  if (!Array.isArray(k.history)) k.history = [];
+  k.history.push({
+    action,
+    detail: detail || null,
+    at: new Date().toISOString(),
+  });
+  if (k.history.length > 50) k.history = k.history.slice(-50);
 }
 
 function cors(r) {
@@ -169,6 +184,7 @@ exports.handler = async function (event) {
     if (hwid) {
       if (!found.hwid) {
         found.hwid = hwid;
+        addHistory(found, "hwid_bind", hwid);
         await saveDB(DB);
       } else if (found.hwid !== hwid) {
         return json(200, { valid: false, reason: "Key vinculada a outro dispositivo" });
@@ -209,7 +225,9 @@ exports.handler = async function (event) {
       expiresAt: calcExpires(duration),
       active:    true,
       hwid:      null,
+      history:   [],
     };
+    addHistory(newKey, "create", `${type} / ${duration}`);
     DB.keys.push(newKey);
     await saveDB(DB);
     return json(201, { success: true, key: newKey });
@@ -228,7 +246,26 @@ exports.handler = async function (event) {
       expired: DB.keys.filter(k => isExpired(k)).length,
     };
 
-    const keysWithMeta = DB.keys.map(k => ({
+    // Filtros opcionais via query string: ?search=...&type=free&status=active
+    const qp = event.queryStringParameters || {};
+    let filtered = DB.keys;
+
+    if (qp.search) {
+      const s = qp.search.trim().toUpperCase();
+      filtered = filtered.filter(k => k.code.includes(s));
+    }
+    if (qp.type && ["free", "premium", "dev"].includes(qp.type)) {
+      filtered = filtered.filter(k => k.type === qp.type);
+    }
+    if (qp.status === "active") {
+      filtered = filtered.filter(k => k.active && !isExpired(k));
+    } else if (qp.status === "inactive") {
+      filtered = filtered.filter(k => !k.active);
+    } else if (qp.status === "expired") {
+      filtered = filtered.filter(k => isExpired(k));
+    }
+
+    const keysWithMeta = filtered.map(k => ({
       ...k,
       expired:  isExpired(k),
       daysLeft: daysLeft(k),
@@ -255,6 +292,7 @@ exports.handler = async function (event) {
     const found = DB.keys.find(k => k.code === code);
     if (!found) return json(404, { error: "Key não encontrada" });
     found.active = !found.active;
+    addHistory(found, found.active ? "activate" : "deactivate");
     await saveDB(DB);
     return json(200, { success: true, active: found.active });
   }
@@ -272,8 +310,69 @@ exports.handler = async function (event) {
     found.duration  = duration;
     found.expiresAt = calcExpires(duration);
     found.active    = true;
+    addHistory(found, "renew", duration);
     await saveDB(DB);
     return json(200, { success: true, key: { ...found, daysLeft: daysLeft(found) } });
+  }
+
+  // ── EDITAR ───────────────────────────────────────────────
+  // Permite trocar tipo, duração, status (ativa/inativa) e desvincular o HWID,
+  // tudo numa chamada só. Qualquer campo omitido no body fica como estava.
+  if (action === "edit") {
+    if (!checkAdmin(event.headers?.authorization)) return json(401, { error: "Não autorizado" });
+    const { code, type, duration, active, resetHwid } = body;
+    const found = DB.keys.find(k => k.code === code);
+    if (!found) return json(404, { error: "Key não encontrada" });
+
+    const changes = [];
+
+    if (type !== undefined && type !== found.type) {
+      if (!["free", "premium", "dev"].includes(type)) {
+        return json(400, { error: "Tipo inválido" });
+      }
+      found.type = type;
+      changes.push(`tipo→${type}`);
+    }
+
+    if (duration !== undefined && duration !== found.duration) {
+      const allowedDur = found.type === "dev" ? ["perm"] : ["1d", "30d", "90d", "perm"];
+      if (!allowedDur.includes(duration)) {
+        return json(400, { error: "Duração inválida para este tipo" });
+      }
+      found.duration = duration;
+      found.expiresAt = calcExpires(duration);
+      changes.push(`duração→${duration}`);
+    }
+
+    if (active !== undefined && !!active !== found.active) {
+      found.active = !!active;
+      changes.push(found.active ? "ativada" : "desativada");
+    }
+
+    if (resetHwid) {
+      found.hwid = null;
+      changes.push("hwid resetado");
+    }
+
+    if (changes.length) {
+      addHistory(found, "edit", changes.join(", "));
+      await saveDB(DB);
+    }
+
+    return json(200, { success: true, key: { ...found, daysLeft: daysLeft(found) } });
+  }
+
+  // ── HISTÓRICO ────────────────────────────────────────────
+  // GET/POST com ?code=XXXX (ou body.code) -> devolve a timeline daquela key.
+  if (action === "history") {
+    if (!checkAdmin(event.headers?.authorization)) return json(401, { error: "Não autorizado" });
+    const code = (event.queryStringParameters || {}).code || body.code;
+    if (!code) return json(400, { error: "Code não informado" });
+
+    const found = DB.keys.find(k => k.code === code);
+    if (!found) return json(404, { error: "Key não encontrada" });
+
+    return json(200, { code: found.code, history: found.history || [] });
   }
 
   return json(404, { error: "Ação não encontrada" });
