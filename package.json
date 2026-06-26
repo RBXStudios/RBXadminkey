@@ -1,0 +1,21 @@
+{
+  "name": "rbx-painel-key-lol",
+  "version": "1.0.0",
+  "description": "RBX Exploit - Painel Admin de Keys",
+  "scripts": {
+    "build": "echo 'Static site - no build step required'"
+  },
+  "keywords": [
+    "rbx",
+    "exploit",
+    "roblox",
+    "keys",
+    "painel"
+  ],
+  "author": "RBX Exploit Studios <rbxexploitstudios@gmail.com>",
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}

@@ -1,5 +1,5 @@
 // ============================================================
-// RBX EXPLOIT — Keys API (persistência simples em arquivo /tmp)
+// RBX EXPLOIT — Keys API (persistência em Netlify Blobs)
 // rbxpainelkeylol.netlify.app/.netlify/functions/keys
 //
 // Rotas (via ?action=...):
@@ -10,28 +10,38 @@
 //   toggle    → ativa / desativa           (admin)
 //   renew     → renova tempo da key        (admin)
 // ============================================================
+//
+// IMPORTANTE: precisa do pacote "@netlify/blobs" instalado nesse projeto
+// (rode `npm install @netlify/blobs` na raiz do site rbxpainelkeylol).
+// Netlify Blobs é um storage key-value persistente de verdade — diferente
+// de /tmp, ele não depende de qual instância da function atendeu o request.
+// ============================================================
 
-const fs = require('fs');
-const path = require('path');
+const { getStore } = require("@netlify/blobs");
 
 const ADMIN_EMAIL    = process.env.PANEL_ADMIN_EMAIL || "rbxstudios@gmail.com";
 const ADMIN_PASSWORD = process.env.PANEL_ADMIN_PASSWORD || "RBXStudios200@@";
 
-// Arquivo local de persistência (melhor usar Netlify Blobs/DB em produção)
-const PERSIST_PATH = process.env.KEYS_FILE_PATH || "/tmp/rbx_keys.json";
+const STORE_NAME = "rbx-keys";
+const DB_KEY     = "db.json";
+
+function getDbStore() {
+  return getStore(STORE_NAME);
+}
 
 // ── Carrega / salva DB ─────────────────────────────────────
-function loadDB() {
+async function loadDB() {
   try {
-    if (fs.existsSync(PERSIST_PATH)) {
-      const txt = fs.readFileSync(PERSIST_PATH, "utf8");
+    const store = getDbStore();
+    const txt = await store.get(DB_KEY, { type: "text" });
+    if (txt) {
       const data = JSON.parse(txt);
       if (data && Array.isArray(data.keys)) return data;
     }
   } catch (e) {
     console.error("loadDB error:", e);
   }
-  // fallback inicial
+  // fallback inicial (primeira execução, ainda sem nada salvo)
   return {
     keys: [
       {
@@ -47,10 +57,10 @@ function loadDB() {
   };
 }
 
-function saveDB(db) {
+async function saveDB(db) {
   try {
-    fs.mkdirSync(path.dirname(PERSIST_PATH), { recursive: true });
-    fs.writeFileSync(PERSIST_PATH, JSON.stringify(db, null, 2), "utf8");
+    const store = getDbStore();
+    await store.set(DB_KEY, JSON.stringify(db, null, 2));
     return true;
   } catch (e) {
     console.error("saveDB error:", e);
@@ -84,6 +94,22 @@ function calcExpires(duration) {
 function isExpired(k) {
   if (!k.expiresAt) return false;
   return new Date() > new Date(k.expiresAt);
+}
+
+// Varre o DB e marca como inativa (active=false) qualquer key que já passou
+// do expiresAt mas ainda estava marcada como active. Persiste a mudança.
+// Chamado logo após loadDB() em toda rota — assim o "active" no painel
+// reflete a realidade sem precisar de cron job nem de alguém clicar em Revogar.
+async function revokeExpiredKeys(DB) {
+  let changed = false;
+  for (const k of DB.keys) {
+    if (k.active && isExpired(k)) {
+      k.active = false;
+      changed = true;
+    }
+  }
+  if (changed) await saveDB(DB);
+  return DB;
 }
 
 function daysLeft(k) {
@@ -123,7 +149,8 @@ exports.handler = async function (event) {
   if (event.httpMethod === "OPTIONS") return cors({ statusCode: 204, body: "" });
 
   // Carrega DB atual
-  let DB = loadDB();
+  let DB = await loadDB();
+  DB = await revokeExpiredKeys(DB);
 
   const action = (event.queryStringParameters || {}).action || "";
   let body = {};
@@ -135,14 +162,14 @@ exports.handler = async function (event) {
     if (!key) return json(400, { valid: false, reason: "Key não informada" });
 
     const found = DB.keys.find(k => k.code === key.trim().toUpperCase());
-    if (!found)          return json(200, { valid: false, reason: "Key inválida" });
-    if (!found.active)   return json(200, { valid: false, reason: "Key desativada" });
+    if (!found)           return json(200, { valid: false, reason: "Key inválida" });
     if (isExpired(found)) return json(200, { valid: false, reason: "Key expirada" });
+    if (!found.active)    return json(200, { valid: false, reason: "Key desativada" });
 
     if (hwid) {
       if (!found.hwid) {
         found.hwid = hwid;
-        saveDB(DB);
+        await saveDB(DB);
       } else if (found.hwid !== hwid) {
         return json(200, { valid: false, reason: "Key vinculada a outro dispositivo" });
       }
@@ -184,7 +211,7 @@ exports.handler = async function (event) {
       hwid:      null,
     };
     DB.keys.push(newKey);
-    saveDB(DB);
+    await saveDB(DB);
     return json(201, { success: true, key: newKey });
   }
 
@@ -217,7 +244,7 @@ exports.handler = async function (event) {
     const idx = DB.keys.findIndex(k => k.code === code);
     if (idx === -1) return json(404, { error: "Key não encontrada" });
     DB.keys.splice(idx, 1);
-    saveDB(DB);
+    await saveDB(DB);
     return json(200, { success: true });
   }
 
@@ -228,7 +255,7 @@ exports.handler = async function (event) {
     const found = DB.keys.find(k => k.code === code);
     if (!found) return json(404, { error: "Key não encontrada" });
     found.active = !found.active;
-    saveDB(DB);
+    await saveDB(DB);
     return json(200, { success: true, active: found.active });
   }
 
@@ -245,7 +272,7 @@ exports.handler = async function (event) {
     found.duration  = duration;
     found.expiresAt = calcExpires(duration);
     found.active    = true;
-    saveDB(DB);
+    await saveDB(DB);
     return json(200, { success: true, key: { ...found, daysLeft: daysLeft(found) } });
   }
 
