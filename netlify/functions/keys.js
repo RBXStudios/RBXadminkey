@@ -17,9 +17,14 @@
 // (rode `npm install @netlify/blobs` na raiz do site rbxpainelkeylol).
 // Netlify Blobs é um storage key-value persistente de verdade — diferente
 // de /tmp, ele não depende de qual instância da function atendeu o request.
+//
+// Como esse handler usa o formato clássico (Lambda compatibility mode:
+// exports.handler = async (event) => {}), o Blobs NÃO detecta o ambiente
+// sozinho — é preciso chamar connectLambda(event) manualmente antes de
+// qualquer getStore(). Sem isso, toda leitura/escrita falha em silêncio.
 // ============================================================
 
-const { getStore } = require("@netlify/blobs");
+const { getStore, connectLambda } = require("@netlify/blobs");
 
 const ADMIN_EMAIL    = process.env.PANEL_ADMIN_EMAIL || "rbxstudios@gmail.com";
 const ADMIN_PASSWORD = process.env.PANEL_ADMIN_PASSWORD || "RBXStudios200@@";
@@ -161,6 +166,9 @@ function checkAdmin(auth) {
 
 // ── Handler ──────────────────────────────────────────────────
 exports.handler = async function (event) {
+  // OBRIGATÓRIO antes de qualquer getStore() — ver explicação no topo do arquivo.
+  connectLambda(event);
+
   if (event.httpMethod === "OPTIONS") return cors({ statusCode: 204, body: "" });
 
   // Carrega DB atual
@@ -229,7 +237,8 @@ exports.handler = async function (event) {
     };
     addHistory(newKey, "create", `${type} / ${duration}`);
     DB.keys.push(newKey);
-    await saveDB(DB);
+    const saved = await saveDB(DB);
+    if (!saved) return json(500, { error: "Key criada na memória, mas falhou ao salvar no storage. Tente de novo." });
     return json(201, { success: true, key: newKey });
   }
 
@@ -281,7 +290,8 @@ exports.handler = async function (event) {
     const idx = DB.keys.findIndex(k => k.code === code);
     if (idx === -1) return json(404, { error: "Key não encontrada" });
     DB.keys.splice(idx, 1);
-    await saveDB(DB);
+    const saved = await saveDB(DB);
+    if (!saved) return json(500, { error: "Falhou ao salvar a remoção no storage. Tente de novo." });
     return json(200, { success: true });
   }
 
@@ -293,7 +303,8 @@ exports.handler = async function (event) {
     if (!found) return json(404, { error: "Key não encontrada" });
     found.active = !found.active;
     addHistory(found, found.active ? "activate" : "deactivate");
-    await saveDB(DB);
+    const saved = await saveDB(DB);
+    if (!saved) return json(500, { error: "Falhou ao salvar no storage. Tente de novo." });
     return json(200, { success: true, active: found.active });
   }
 
@@ -311,7 +322,8 @@ exports.handler = async function (event) {
     found.expiresAt = calcExpires(duration);
     found.active    = true;
     addHistory(found, "renew", duration);
-    await saveDB(DB);
+    const saved = await saveDB(DB);
+    if (!saved) return json(500, { error: "Falhou ao salvar no storage. Tente de novo." });
     return json(200, { success: true, key: { ...found, daysLeft: daysLeft(found) } });
   }
 
@@ -356,7 +368,8 @@ exports.handler = async function (event) {
 
     if (changes.length) {
       addHistory(found, "edit", changes.join(", "));
-      await saveDB(DB);
+      const saved = await saveDB(DB);
+      if (!saved) return json(500, { error: "Falhou ao salvar no storage. Tente de novo." });
     }
 
     return json(200, { success: true, key: { ...found, daysLeft: daysLeft(found) } });
