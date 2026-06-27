@@ -191,6 +191,23 @@ exports.handler = async function (event) {
 
     if (hwid) {
       if (!found.hwid) {
+        // Regra anti-abuso: um dispositivo só pode ter UMA key FREE ativa
+        // vinculada por vez. Isso impede gerar key grátis nova toda hora pra
+        // sempre ter acesso, contornando a duração de 1 dia. Keys premium
+        // não entram nessa regra (são pagas, sem limite de quantidade).
+        if (found.type === "free") {
+          const conflictingFree = DB.keys.find(k =>
+            k.code !== found.code &&
+            k.type === "free" &&
+            k.hwid === hwid &&
+            k.active &&
+            !isExpired(k)
+          );
+          if (conflictingFree) {
+            return json(200, { valid: false, reason: "Você já tem uma key grátis vinculada" });
+          }
+        }
+
         found.hwid = hwid;
         addHistory(found, "hwid_bind", hwid);
         await saveDB(DB);

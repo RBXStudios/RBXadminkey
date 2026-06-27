@@ -93,6 +93,20 @@
 
     /* Tabela */
     .sec-title{font-family:var(--font-d);font-size:.65rem;letter-spacing:.12em;color:var(--text-dim);margin-bottom:12px;}
+    .filter-row{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;}
+    .flt-input{flex:1;min-width:200px;padding:10px 14px;border-radius:8px;
+      background:rgba(0,0,0,.4);border:1px solid var(--surface-border);
+      color:var(--text);font-family:var(--font-b);font-size:.88rem;outline:none;transition:border-color .3s;}
+    .flt-input:focus{border-color:var(--neon);}
+    .flt-select{padding:10px 14px;border-radius:8px;
+      background:rgba(0,0,0,.4);border:1px solid var(--surface-border);
+      color:var(--text);font-family:var(--font-b);font-size:.88rem;outline:none;cursor:pointer;
+      appearance:none;
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%2300ffe7' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");
+      background-repeat:no-repeat;background-position:right 12px center;padding-right:32px;}
+    .flt-select:focus{border-color:var(--neon);}
+    .hwid-td{font-size:.76rem;color:var(--text-dim);font-family:Consolas,monospace;}
+    .hwid-none{color:#555;font-style:italic;}
     .tbl-wrap{background:var(--surface);border:1px solid var(--surface-border);border-radius:12px;overflow:hidden;overflow-x:auto;}
     table{width:100%;border-collapse:collapse;min-width:700px;}
     thead tr{border-bottom:1px solid var(--surface-border);}
@@ -255,16 +269,34 @@
         <div class="sbox">        <div class="sl">ATIVAS</div>  <div class="sv" id="stActive">—</div></div>
         <div class="sbox s-exp">  <div class="sl">EXPIRADAS</div><div class="sv" id="stExp">—</div></div>
       </div>
+
+      <div class="filter-row">
+        <input type="text" id="fltSearch" class="flt-input" placeholder="🔍 Buscar por código..."
+               oninput="onFilterChange()"/>
+        <select id="fltType" class="flt-select" onchange="onFilterChange()">
+          <option value="">Todos os tipos</option>
+          <option value="free">Free</option>
+          <option value="premium">Premium</option>
+          <option value="dev">Dev</option>
+        </select>
+        <select id="fltStatus" class="flt-select" onchange="onFilterChange()">
+          <option value="">Todos os status</option>
+          <option value="active">Ativas</option>
+          <option value="inactive">Inativas</option>
+          <option value="expired">Expiradas</option>
+        </select>
+      </div>
+
       <div class="sec-title">LISTA DE KEYS</div>
       <div class="tbl-wrap">
         <table>
           <thead>
             <tr>
               <th>CÓDIGO</th><th>TIPO</th><th>STATUS</th>
-              <th>TEMPO RESTANTE</th><th>EXPIRA EM</th><th>AÇÕES</th>
+              <th>TEMPO RESTANTE</th><th>EXPIRA EM</th><th>HWID</th><th>AÇÕES</th>
             </tr>
           </thead>
-          <tbody id="keysBody"><tr><td colspan="6" class="empty-td">Carregando...</td></tr></tbody>
+          <tbody id="keysBody"><tr><td colspan="7" class="empty-td">Carregando...</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -403,23 +435,94 @@ Body: { "type": "free", "duration": "1d" }</pre>
   </div>
 </div>
 
+<!-- MODAL EDITAR -->
+<div class="modal-bg" id="editModal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeEdit()">✕</button>
+    <div class="modal-title">EDITAR KEY</div>
+    <div class="modal-sub">Key: <span class="mc" id="editCode">—</span></div>
+    <div class="fg">
+      <label>TIPO</label>
+      <select id="editType">
+        <option value="free">Free</option>
+        <option value="premium">Premium</option>
+        <option value="dev">Dev</option>
+      </select>
+    </div>
+    <div class="fg">
+      <label>DURAÇÃO (recalcula a data de expiração)</label>
+      <select id="editDuration">
+        <option value="1d">1 Dia</option>
+        <option value="30d">30 Dias</option>
+        <option value="90d">90 Dias</option>
+        <option value="perm">Permanente</option>
+      </select>
+    </div>
+    <div class="fg" style="display:flex;align-items:center;gap:10px;">
+      <input type="checkbox" id="editActive" style="width:16px;height:16px;"/>
+      <label style="margin:0;">Key ativa</label>
+    </div>
+    <div class="fg" style="display:flex;align-items:center;gap:10px;">
+      <input type="checkbox" id="editResetHwid" style="width:16px;height:16px;"/>
+      <label style="margin:0;">Desvincular HWID (libera pra outro dispositivo)</label>
+    </div>
+    <button class="btn-create" onclick="confirmEdit()">✓ SALVAR ALTERAÇÕES</button>
+  </div>
+</div>
+
+<!-- MODAL HISTÓRICO -->
+<div class="modal-bg" id="historyModal">
+  <div class="modal" style="width:440px;max-height:70vh;overflow-y:auto;">
+    <button class="modal-close" onclick="closeHistory()">✕</button>
+    <div class="modal-title">HISTÓRICO DA KEY</div>
+    <div class="modal-sub">Key: <span class="mc" id="historyCode">—</span></div>
+    <div id="historyList" style="display:flex;flex-direction:column;gap:10px;"></div>
+  </div>
+</div>
+
 <script>
-  const ADMIN_EMAIL    = 'rbxstudios@gmail.com';
-  const ADMIN_PASSWORD = 'RBXStudios200@@';
   const API = 'https://rbxpainelkeylol.netlify.app/api/keys';
   let authHeader = '';
   let renewingCode = '';
+  let editingCode = '';
 
   // ── Login ────────────────────────────────────────────────
-  function doLogin() {
+  // IMPORTANTE: não comparamos com nenhum usuário/senha fixos no JS — isso
+  // ficava visível pra qualquer um que abrisse "Ver código-fonte" da página.
+  // Em vez disso, testamos as credenciais digitadas chamando ?action=list
+  // direto no servidor: só ele sabe a senha real (vem das env vars).
+  async function doLogin() {
     const e = document.getElementById('inEmail').value.trim();
     const p = document.getElementById('inPass').value;
-    if (e === ADMIN_EMAIL && p === ADMIN_PASSWORD) {
-      authHeader = 'Basic ' + btoa(e + ':' + p);
+    const candidate = 'Basic ' + btoa(e + ':' + p);
+
+    const btn = document.querySelector('.btn-login');
+    const errEl = document.getElementById('loginErr');
+    errEl.style.display = 'none';
+    btn.disabled = true;
+    btn.textContent = '⏳ VERIFICANDO...';
+
+    try {
+      const res = await fetch(API + '?action=list', { headers: { Authorization: candidate } });
+      if (res.status === 401) {
+        errEl.textContent = 'Email ou senha incorretos.';
+        errEl.style.display = 'block';
+        return;
+      }
+      if (!res.ok) {
+        errEl.textContent = 'Não foi possível conectar ao servidor. Tente de novo.';
+        errEl.style.display = 'block';
+        return;
+      }
+      authHeader = candidate;
       sessionStorage.setItem('rbx-auth', authHeader);
       showApp();
-    } else {
-      document.getElementById('loginErr').style.display = 'block';
+    } catch {
+      errEl.textContent = 'Erro de conexão. Tente de novo.';
+      errEl.style.display = 'block';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '⚡ ENTRAR';
     }
   }
   document.getElementById('inPass').addEventListener('keydown', ev => { if(ev.key==='Enter') doLogin(); });
